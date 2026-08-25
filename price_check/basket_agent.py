@@ -4,7 +4,7 @@ from typing import List, Literal, Optional
 from google import genai
 from pydantic import BaseModel
 
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-3.6-flash"
 
 
 class ParsedItem(BaseModel):
