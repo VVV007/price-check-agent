@@ -113,10 +113,10 @@ with st.sidebar:
     st.divider()
     st.header("🤖 Agent")
     api_key = st.text_input(
-        "Anthropic API key",
-        value=st.session_state.get("api_key", os.environ.get("ANTHROPIC_API_KEY", "")),
+        "Gemini API key",
+        value=st.session_state.get("api_key", os.environ.get("GEMINI_API_KEY", "")),
         type="password",
-        help="Only kept for this session, never saved. Get one at console.anthropic.com",
+        help="Only kept for this session, never saved. Free — get one at aistudio.google.com/app/apikey",
     )
     st.session_state.api_key = api_key
 
@@ -166,7 +166,7 @@ with tab_agent:
         if not pincode:
             st.error("Enter a delivery pincode in the sidebar first.")
         elif not api_key:
-            st.error("Enter your Anthropic API key in the sidebar first.")
+            st.error("Enter your Gemini API key in the sidebar first.")
         elif not shopping_text.strip():
             st.error("Tell it what you need first.")
         else:
@@ -175,7 +175,7 @@ with tab_agent:
                 with st.spinner("Reading your list..."):
                     parsed_items = parse_shopping_list(api_key, shopping_text)
             except Exception as e:
-                st.error(f"Couldn't reach Claude to parse your list: {e}")
+                st.error(f"Couldn't reach Gemini to parse your list: {e}")
 
             if parsed_items:
                 results_by_item = []
@@ -217,7 +217,7 @@ with tab_agent:
                     with st.spinner("Comparing prices and writing your recommendation..."):
                         st.session_state.agent_report = build_comparison_report(api_key, results_by_item)
                 except Exception as e:
-                    st.error(f"Couldn't get a comparison from Claude: {e}")
+                    st.error(f"Couldn't get a comparison from Gemini: {e}")
                 progress.empty()
 
     report = st.session_state.get("agent_report")
