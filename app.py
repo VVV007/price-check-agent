@@ -185,7 +185,13 @@ if st.session_state.results:
             )
             items = st.session_state.results.get(platform, [])
             if platform in st.session_state.errors:
-                st.error(st.session_state.errors[platform])
+                info = st.session_state.errors[platform]
+                st.error(info["message"])
+                if info.get("screenshot"):
+                    with st.expander("Show what the page looked like"):
+                        if info.get("url"):
+                            st.caption(info["url"])
+                        st.image(info["screenshot"])
                 continue
             if not items:
                 st.caption("No results.")

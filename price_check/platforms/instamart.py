@@ -7,6 +7,7 @@ from playwright.async_api import Browser
 _DEBUG = os.environ.get("PRICECHECK_DEBUG") == "1"
 
 from ..browser import new_stealth_context
+from ..errors import PlatformError
 from ..models import ProductResult
 
 PLATFORM = "Swiggy Instamart"
@@ -76,8 +77,14 @@ async def search(browser: Browser, product: str, pincode: str, limit: int = 10, 
         if _DEBUG:
             await page.screenshot(path="dbg_im_6_search.png")
     except Exception as e:
+        screenshot = None
+        try:
+            screenshot = await page.screenshot()
+        except Exception:
+            pass
+        url = page.url
         await context.close()
-        raise RuntimeError(f"{PLATFORM}: {e}") from e
+        raise PlatformError(f"{PLATFORM}: {e}", screenshot=screenshot, url=url) from e
 
     await context.close()
     return _parse(captured, limit)

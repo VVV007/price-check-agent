@@ -6,6 +6,7 @@ import sys
 from playwright.async_api import async_playwright
 
 from .platforms import blinkit, zepto, instamart
+from .errors import PlatformError
 from .models import ProductResult
 
 PLATFORMS = [blinkit, zepto, instamart]
@@ -19,16 +20,18 @@ async def run(product: str, pincode: str, limit: int):
         browser = await p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
 
         async def run_one(module):
-            last_error = None
+            last_error = {"message": None, "screenshot": None, "url": None}
             for attempt in range(2):
                 try:
                     results = await module.search(browser, product, pincode, limit=limit)
                     if results:
                         results_by_platform[module.PLATFORM] = results
                         return
-                    last_error = "no results returned"
+                    last_error = {"message": "no results returned", "screenshot": None, "url": None}
+                except PlatformError as e:
+                    last_error = {"message": str(e), "screenshot": e.screenshot, "url": e.url}
                 except Exception as e:
-                    last_error = str(e)
+                    last_error = {"message": str(e), "screenshot": None, "url": None}
             errors[module.PLATFORM] = last_error
 
         await asyncio.gather(*(run_one(m) for m in PLATFORMS))
@@ -60,8 +63,8 @@ def print_table(results_by_platform: dict, errors: dict):
 
     if errors:
         print("\nPlatforms that failed:")
-        for platform, msg in errors.items():
-            print(f"  - {platform}: {msg}")
+        for platform, info in errors.items():
+            print(f"  - {platform}: {info['message']}")
 
 
 def write_csv(path: str, results_by_platform: dict):

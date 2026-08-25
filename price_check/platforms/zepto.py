@@ -4,6 +4,7 @@ import urllib.parse
 from playwright.async_api import Browser
 
 from ..browser import new_stealth_context
+from ..errors import PlatformError
 from ..models import ProductResult
 
 PLATFORM = "Zepto"
@@ -61,8 +62,14 @@ async def search(browser: Browser, product: str, pincode: str, limit: int = 10, 
         except Exception:
             pass
     except Exception as e:
+        screenshot = None
+        try:
+            screenshot = await page.screenshot()
+        except Exception:
+            pass
+        url = page.url
         await context.close()
-        raise RuntimeError(f"{PLATFORM}: {e}") from e
+        raise PlatformError(f"{PLATFORM}: {e}", screenshot=screenshot, url=url) from e
 
     await context.close()
     return _parse(captured, limit)
