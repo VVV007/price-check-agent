@@ -1,4 +1,5 @@
 import asyncio
+import os
 import subprocess
 import sys
 import threading
@@ -20,11 +21,24 @@ def _ensure_chromium_installed():
 _ensure_chromium_installed()
 
 from price_check.cli import run as run_search  # noqa: E402
+from price_check.basket_agent import parse_shopping_list, build_comparison_report  # noqa: E402
 
 # Each search drives real headless-browser sessions, which is heavy on a small shared
 # server. Cap it to one search at a time server-wide so concurrent friends queue up
 # instead of all launching browsers simultaneously and starving the box.
 _SEARCH_SLOT = threading.Semaphore(1)
+
+
+def run_priced_search(product: str, pincode: str, limit: int, wait_message: str, working_message: str):
+    busy = not _SEARCH_SLOT.acquire(timeout=0.1)
+    if busy:
+        with st.spinner(wait_message):
+            _SEARCH_SLOT.acquire()
+    try:
+        with st.spinner(working_message):
+            return asyncio.run(run_search(product, pincode, limit))
+    finally:
+        _SEARCH_SLOT.release()
 
 PLATFORM_COLOR = {
     "Blinkit": "#f8cb46",
@@ -97,6 +111,16 @@ with st.sidebar:
     limit = st.slider("Results per platform", min_value=3, max_value=20, value=8)
 
     st.divider()
+    st.header("🤖 Agent")
+    api_key = st.text_input(
+        "Anthropic API key",
+        value=st.session_state.get("api_key", os.environ.get("ANTHROPIC_API_KEY", "")),
+        type="password",
+        help="Only kept for this session, never saved. Get one at console.anthropic.com",
+    )
+    st.session_state.api_key = api_key
+
+    st.divider()
     st.header(f"🧺 Basket ({len(st.session_state.basket)})")
 
     if st.session_state.basket:
@@ -123,109 +147,231 @@ with st.sidebar:
     else:
         st.caption("No items yet. Search below and add products.")
 
-col1, col2 = st.columns([4, 1])
-product = col1.text_input("Search for a product", placeholder='e.g. "amul butter"', label_visibility="collapsed")
-search_clicked = col2.button("Search", use_container_width=True)
+tab_agent, tab_manual = st.tabs(["🤖 Ask the agent", "🔍 Manual search"])
 
-if search_clicked:
-    if not pincode:
-        st.error("Enter a delivery pincode in the sidebar first.")
-    elif not product:
-        st.error("Enter a product to search for.")
-    else:
-        busy = not _SEARCH_SLOT.acquire(timeout=0.1)
-        if busy:
-            with st.spinner("Another search is in progress on this server — waiting for your turn..."):
-                _SEARCH_SLOT.acquire()
-        try:
-            with st.spinner(f'Checking prices for "{product}" across platforms...'):
-                results, errors = asyncio.run(run_search(product, pincode, limit))
+with tab_agent:
+    st.caption(
+        "Tell it everything you need, and it will check all three platforms for each item, "
+        "match up the closest real products, and tell you where it's cheapest overall."
+    )
+    shopping_text = st.text_area(
+        "What do you need?",
+        placeholder="e.g.\namul butter\n2 loaves of bread\nmaggi noodles x4\ntoothpaste",
+        height=120,
+        label_visibility="collapsed",
+    )
+    find_clicked = st.button("Find best prices", type="primary")
+
+    if find_clicked:
+        if not pincode:
+            st.error("Enter a delivery pincode in the sidebar first.")
+        elif not api_key:
+            st.error("Enter your Anthropic API key in the sidebar first.")
+        elif not shopping_text.strip():
+            st.error("Tell it what you need first.")
+        else:
+            parsed_items = None
+            try:
+                with st.spinner("Reading your list..."):
+                    parsed_items = parse_shopping_list(api_key, shopping_text)
+            except Exception as e:
+                st.error(f"Couldn't reach Claude to parse your list: {e}")
+
+            if parsed_items:
+                results_by_item = []
+                progress = st.progress(0.0, text="Starting...")
+                for i, item in enumerate(parsed_items):
+                    progress.progress(
+                        i / len(parsed_items),
+                        text=f"Checking {i + 1}/{len(parsed_items)}: {item.display_name}...",
+                    )
+                    item_results, _item_errors = run_priced_search(
+                        item.query,
+                        pincode,
+                        limit,
+                        wait_message="Another search is in progress on this server — waiting for your turn...",
+                        working_message=f'Checking prices for "{item.display_name}"...',
+                    )
+                    results_by_item.append(
+                        {
+                            "requested": item.display_name,
+                            "quantity": item.quantity,
+                            "results": {
+                                platform: [
+                                    {
+                                        "name": r.name,
+                                        "quantity": r.quantity,
+                                        "price": r.price,
+                                        "mrp": r.mrp,
+                                        "in_stock": r.in_stock,
+                                    }
+                                    for r in platform_results
+                                ]
+                                for platform, platform_results in item_results.items()
+                            },
+                        }
+                    )
+                progress.progress(1.0, text="Comparing prices...")
+
+                try:
+                    with st.spinner("Comparing prices and writing your recommendation..."):
+                        st.session_state.agent_report = build_comparison_report(api_key, results_by_item)
+                except Exception as e:
+                    st.error(f"Couldn't get a comparison from Claude: {e}")
+                progress.empty()
+
+    report = st.session_state.get("agent_report")
+    if report:
+        st.divider()
+        st.success(report.summary)
+
+        platform_totals = {
+            "Blinkit": report.blinkit_total,
+            "Zepto": report.zepto_total,
+            "Swiggy Instamart": report.swiggy_instamart_total,
+        }
+        summary_cols = st.columns(len(platform_totals) + 1)
+        for scol, (platform, total) in zip(summary_cols, platform_totals.items()):
+            with scol:
+                st.metric(platform, f"₹{total.total:.0f}")
+                if total.missing_items:
+                    st.caption(f"Missing: {', '.join(total.missing_items)}")
+        with summary_cols[-1]:
+            st.metric("Optimal mix", f"₹{report.optimal_mixed_total:.0f}")
+            st.caption("Buying each item from its cheapest platform")
+
+        st.divider()
+        st.subheader("Item by item")
+        for item in report.items:
+            with st.container(border=True):
+                qty_txt = f" ×{item.quantity}" if item.quantity != 1 else ""
+                st.markdown(f"**{item.requested}**{qty_txt}")
+                item_cols = st.columns(3)
+                matches = {
+                    "Blinkit": item.blinkit,
+                    "Zepto": item.zepto,
+                    "Swiggy Instamart": item.swiggy_instamart,
+                }
+                for icol, (platform, match) in zip(item_cols, matches.items()):
+                    with icol:
+                        color = PLATFORM_COLOR[platform]
+                        text_color = PLATFORM_TEXT[platform]
+                        st.markdown(
+                            f'<span class="platform-badge" style="background:{color};color:{text_color};">'
+                            f"{platform}</span>",
+                            unsafe_allow_html=True,
+                        )
+                        if match and match.price is not None:
+                            star = " 🏆" if platform == item.cheapest_platform else ""
+                            st.markdown(f"{match.name}")
+                            st.caption(f"₹{match.price:.0f} · {match.quantity_label or '-'}{star}")
+                        else:
+                            st.caption("Not found")
+
+with tab_manual:
+    col1, col2 = st.columns([4, 1])
+    product = col1.text_input(
+        "Search for a product", placeholder='e.g. "amul butter"', label_visibility="collapsed"
+    )
+    search_clicked = col2.button("Search", use_container_width=True)
+
+    if search_clicked:
+        if not pincode:
+            st.error("Enter a delivery pincode in the sidebar first.")
+        elif not product:
+            st.error("Enter a product to search for.")
+        else:
+            results, errors = run_priced_search(
+                product,
+                pincode,
+                limit,
+                wait_message="Another search is in progress on this server — waiting for your turn...",
+                working_message=f'Checking prices for "{product}" across platforms...',
+            )
             st.session_state.results = results
             st.session_state.errors = errors
             st.session_state.last_query = product
-        finally:
-            _SEARCH_SLOT.release()
 
-if st.session_state.results:
-    st.subheader(f'Results for "{st.session_state.last_query}"')
+    if st.session_state.results:
+        st.subheader(f'Results for "{st.session_state.last_query}"')
 
-    # --- quick compare: cheapest match per platform ---
-    cheapest = {}
-    for platform, items in st.session_state.results.items():
-        priced = [r.price for r in items if r.price is not None]
-        if priced:
-            cheapest[platform] = min(priced)
-    if cheapest:
-        overall_min = min(cheapest.values())
-        metric_cols = st.columns(len(PLATFORM_COLOR))
-        for mcol, platform in zip(metric_cols, PLATFORM_COLOR):
-            price = cheapest.get(platform)
-            with mcol:
-                if price is None:
-                    st.metric(platform, "-")
-                else:
-                    diff = price - overall_min
-                    mcol.metric(
-                        platform,
-                        f"₹{price:.0f}",
-                        delta=("Cheapest 🏆" if diff == 0 else f"+₹{diff:.0f} vs cheapest"),
-                        delta_color="normal" if diff == 0 else "inverse",
-                    )
-        st.divider()
-
-    # --- side-by-side product cards per platform ---
-    columns = st.columns(len(PLATFORM_COLOR))
-    for pcol, platform in zip(columns, PLATFORM_COLOR):
-        with pcol:
-            color = PLATFORM_COLOR[platform]
-            text_color = PLATFORM_TEXT[platform]
-            st.markdown(
-                f'<span class="platform-badge" style="background:{color};color:{text_color};">{platform}</span>',
-                unsafe_allow_html=True,
-            )
-            items = st.session_state.results.get(platform, [])
-            if platform in st.session_state.errors:
-                info = st.session_state.errors[platform]
-                st.error(info["message"])
-                if info.get("screenshot"):
-                    with st.expander("Show what the page looked like"):
-                        if info.get("url"):
-                            st.caption(info["url"])
-                        st.image(info["screenshot"])
-                continue
-            if not items:
-                st.caption("No results.")
-                continue
-
-            for idx, r in enumerate(sorted(items, key=lambda x: (x.price is None, x.price))):
-                with st.container(border=True):
-                    st.markdown(f"**{r.name}**")
-                    st.caption(r.quantity or "-")
-                    price_txt = f"₹{r.price:.0f}" if r.price is not None else "-"
-                    st.markdown(f'<p class="price-big">{price_txt}</p>', unsafe_allow_html=True)
-
-                    if r.mrp is not None and r.discount_percent:
-                        st.markdown(
-                            f'<span class="mrp-strike">₹{r.mrp:.0f}</span> '
-                            f'<span class="discount-tag">{r.discount_percent:.0f}% off</span>',
-                            unsafe_allow_html=True,
+        # --- quick compare: cheapest match per platform ---
+        cheapest = {}
+        for platform, items in st.session_state.results.items():
+            priced = [r.price for r in items if r.price is not None]
+            if priced:
+                cheapest[platform] = min(priced)
+        if cheapest:
+            overall_min = min(cheapest.values())
+            metric_cols = st.columns(len(PLATFORM_COLOR))
+            for mcol, platform in zip(metric_cols, PLATFORM_COLOR):
+                price = cheapest.get(platform)
+                with mcol:
+                    if price is None:
+                        st.metric(platform, "-")
+                    else:
+                        diff = price - overall_min
+                        mcol.metric(
+                            platform,
+                            f"₹{price:.0f}",
+                            delta=("Cheapest 🏆" if diff == 0 else f"+₹{diff:.0f} vs cheapest"),
+                            delta_color="normal" if diff == 0 else "inverse",
                         )
-                    if not r.in_stock:
-                        st.markdown('<span class="oos-tag">Out of stock</span>', unsafe_allow_html=True)
+            st.divider()
 
-                    if st.button(
-                        "Add to basket",
-                        key=f"add_{platform}_{idx}",
-                        use_container_width=True,
-                        disabled=not r.in_stock,
-                    ):
-                        st.session_state.basket.append(
-                            {
-                                "platform": r.platform,
-                                "name": r.name,
-                                "quantity": r.quantity,
-                                "price": r.price,
-                                "mrp": r.mrp,
-                            }
-                        )
-                        st.toast(f"Added {r.name} ({platform}) to basket")
+        # --- side-by-side product cards per platform ---
+        columns = st.columns(len(PLATFORM_COLOR))
+        for pcol, platform in zip(columns, PLATFORM_COLOR):
+            with pcol:
+                color = PLATFORM_COLOR[platform]
+                text_color = PLATFORM_TEXT[platform]
+                st.markdown(
+                    f'<span class="platform-badge" style="background:{color};color:{text_color};">{platform}</span>',
+                    unsafe_allow_html=True,
+                )
+                items = st.session_state.results.get(platform, [])
+                if platform in st.session_state.errors:
+                    info = st.session_state.errors[platform]
+                    st.error(info["message"])
+                    if info.get("screenshot"):
+                        with st.expander("Show what the page looked like"):
+                            if info.get("url"):
+                                st.caption(info["url"])
+                            st.image(info["screenshot"])
+                    continue
+                if not items:
+                    st.caption("No results.")
+                    continue
+
+                for idx, r in enumerate(sorted(items, key=lambda x: (x.price is None, x.price))):
+                    with st.container(border=True):
+                        st.markdown(f"**{r.name}**")
+                        st.caption(r.quantity or "-")
+                        price_txt = f"₹{r.price:.0f}" if r.price is not None else "-"
+                        st.markdown(f'<p class="price-big">{price_txt}</p>', unsafe_allow_html=True)
+
+                        if r.mrp is not None and r.discount_percent:
+                            st.markdown(
+                                f'<span class="mrp-strike">₹{r.mrp:.0f}</span> '
+                                f'<span class="discount-tag">{r.discount_percent:.0f}% off</span>',
+                                unsafe_allow_html=True,
+                            )
+                        if not r.in_stock:
+                            st.markdown('<span class="oos-tag">Out of stock</span>', unsafe_allow_html=True)
+
+                        if st.button(
+                            "Add to basket",
+                            key=f"add_{platform}_{idx}",
+                            use_container_width=True,
+                            disabled=not r.in_stock,
+                        ):
+                            st.session_state.basket.append(
+                                {
+                                    "platform": r.platform,
+                                    "name": r.name,
+                                    "quantity": r.quantity,
+                                    "price": r.price,
+                                    "mrp": r.mrp,
+                                }
+                            )
+                            st.toast(f"Added {r.name} ({platform}) to basket")
