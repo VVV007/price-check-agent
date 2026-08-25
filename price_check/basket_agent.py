@@ -3,7 +3,7 @@ from typing import List, Literal, Optional
 from anthropic import Anthropic
 from pydantic import BaseModel
 
-MODEL = "claude-opus-5"
+MODEL = "claude-haiku-4-5-20251001"
 
 
 class ParsedItem(BaseModel):
