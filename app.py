@@ -87,6 +87,71 @@ st.markdown(
         font-weight: 600;
         font-size: 12px;
     }
+    .reco-banner {
+        background: rgba(99, 102, 241, 0.10);
+        border: 1px solid rgba(99, 102, 241, 0.35);
+        border-radius: 12px;
+        padding: 16px 20px;
+        font-size: 15px;
+        line-height: 1.5;
+        margin-bottom: 4px;
+    }
+    .summary-tile {
+        border-radius: 12px;
+        padding: 14px 16px;
+        border: 1px solid rgba(128, 128, 128, 0.25);
+        height: 100%;
+    }
+    .summary-tile.winner {
+        background: rgba(250, 204, 21, 0.12);
+        border: 1px solid rgba(217, 160, 12, 0.5);
+    }
+    .summary-tile.optimal {
+        background: rgba(99, 102, 241, 0.10);
+        border: 1px solid rgba(99, 102, 241, 0.45);
+    }
+    .tile-label {
+        font-size: 12px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: .03em;
+        opacity: 0.65;
+        margin-bottom: 4px;
+    }
+    .tile-price {
+        font-size: 24px;
+        font-weight: 700;
+        line-height: 1.2;
+    }
+    .tile-sub {
+        font-size: 12px;
+        opacity: 0.7;
+        margin-top: 2px;
+    }
+    .platform-tile {
+        border-radius: 10px;
+        padding: 10px 12px;
+        border: 1px solid rgba(128, 128, 128, 0.2);
+        min-height: 92px;
+    }
+    .platform-tile.winner {
+        background: rgba(34, 197, 94, 0.12);
+        border: 1px solid rgba(34, 197, 94, 0.45);
+    }
+    .platform-tile.na {
+        opacity: 0.45;
+    }
+    .best-tag {
+        display: inline-block;
+        background: #1a9c4b;
+        color: white;
+        font-size: 10px;
+        font-weight: 700;
+        padding: 1px 8px;
+        border-radius: 999px;
+        margin-left: 6px;
+        vertical-align: middle;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -223,22 +288,46 @@ with tab_agent:
     report = st.session_state.get("agent_report")
     if report:
         st.divider()
-        st.success(report.summary)
+        st.markdown(f'<div class="reco-banner">💡 {report.summary}</div>', unsafe_allow_html=True)
+        st.write("")
 
         platform_totals = {
             "Blinkit": report.blinkit_total,
             "Zepto": report.zepto_total,
             "Swiggy Instamart": report.swiggy_instamart_total,
         }
+        cheapest_single = min(platform_totals, key=lambda p: platform_totals[p].total)
+
         summary_cols = st.columns(len(platform_totals) + 1)
         for scol, (platform, total) in zip(summary_cols, platform_totals.items()):
             with scol:
-                st.metric(platform, f"₹{total.total:.0f}")
-                if total.missing_items:
-                    st.caption(f"Missing: {', '.join(total.missing_items)}")
+                is_winner = platform == cheapest_single
+                tile_class = "summary-tile winner" if is_winner else "summary-tile"
+                best_tag = '<span class="best-tag">CHEAPEST</span>' if is_winner else ""
+                missing_txt = (
+                    f'<div class="tile-sub">Missing: {", ".join(total.missing_items)}</div>'
+                    if total.missing_items
+                    else '<div class="tile-sub">Everything found</div>'
+                )
+                st.markdown(
+                    f'<div class="{tile_class}">'
+                    f'<div class="tile-label">{platform}{best_tag}</div>'
+                    f'<div class="tile-price">₹{total.total:.0f}</div>'
+                    f"{missing_txt}"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
         with summary_cols[-1]:
-            st.metric("Optimal mix", f"₹{report.optimal_mixed_total:.0f}")
-            st.caption("Buying each item from its cheapest platform")
+            savings = max(0, min(t.total for t in platform_totals.values()) - report.optimal_mixed_total)
+            savings_txt = f"Saves ₹{savings:.0f} vs. best single platform" if savings > 0 else "Same as best single platform"
+            st.markdown(
+                f'<div class="summary-tile optimal">'
+                f'<div class="tile-label">Optimal mix ✨</div>'
+                f'<div class="tile-price">₹{report.optimal_mixed_total:.0f}</div>'
+                f'<div class="tile-sub">{savings_txt}</div>'
+                f"</div>",
+                unsafe_allow_html=True,
+            )
 
         st.divider()
         st.subheader("Item by item")
@@ -256,17 +345,24 @@ with tab_agent:
                     with icol:
                         color = PLATFORM_COLOR[platform]
                         text_color = PLATFORM_TEXT[platform]
-                        st.markdown(
-                            f'<span class="platform-badge" style="background:{color};color:{text_color};">'
-                            f"{platform}</span>",
-                            unsafe_allow_html=True,
+                        is_winner = match.found and platform == item.cheapest_platform
+                        tile_class = "platform-tile winner" if is_winner else (
+                            "platform-tile na" if not match.found else "platform-tile"
                         )
-                        if match and match.price is not None:
-                            star = " 🏆" if platform == item.cheapest_platform else ""
-                            st.markdown(f"{match.name}")
-                            st.caption(f"₹{match.price:.0f} · {match.quantity_label or '-'}{star}")
+                        best_tag = '<span class="best-tag">BEST</span>' if is_winner else ""
+                        badge = (
+                            f'<span class="platform-badge" style="background:{color};color:{text_color};">'
+                            f"{platform}</span>{best_tag}"
+                        )
+                        if match.found:
+                            body = (
+                                f'<div style="margin-top:6px;font-size:13px;">{match.name}</div>'
+                                f'<div style="margin-top:4px;font-weight:700;">₹{match.price:.0f}</div>'
+                                f'<div class="tile-sub">{match.quantity_label or "-"}</div>'
+                            )
                         else:
-                            st.caption("Not found")
+                            body = '<div class="tile-sub" style="margin-top:10px;">Not available</div>'
+                        st.markdown(f'<div class="{tile_class}">{badge}{body}</div>', unsafe_allow_html=True)
 
 with tab_manual:
     col1, col2 = st.columns([4, 1])

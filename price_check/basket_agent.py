@@ -1,5 +1,5 @@
 import json
-from typing import List, Literal, Optional
+from typing import List, Literal
 
 from google import genai
 from pydantic import BaseModel
@@ -17,24 +17,30 @@ class ParsedShoppingList(BaseModel):
     items: List[ParsedItem]
 
 
+# Gemini's structured-output schema support does not reliably handle Pydantic's
+# `Optional[...]` fields (serialized as `anyOf: [X, {"type": "null"}]`) — nested
+# `$ref`/`$defs` alone work fine, but adding nullable fields caused it to silently
+# collapse the response (duplicated/truncated items) instead of erroring. So every
+# field below is required, using sentinel values ("" / -1 / "none") instead of null.
 class PlatformMatch(BaseModel):
-    name: Optional[str] = None
-    price: Optional[float] = None
-    quantity_label: Optional[str] = None
+    found: bool
+    name: str = ""
+    price: float = -1
+    quantity_label: str = ""
 
 
 class ItemComparison(BaseModel):
     requested: str
     quantity: int
-    blinkit: Optional[PlatformMatch] = None
-    zepto: Optional[PlatformMatch] = None
-    swiggy_instamart: Optional[PlatformMatch] = None
-    cheapest_platform: Optional[Literal["Blinkit", "Zepto", "Swiggy Instamart"]] = None
+    blinkit: PlatformMatch
+    zepto: PlatformMatch
+    swiggy_instamart: PlatformMatch
+    cheapest_platform: Literal["Blinkit", "Zepto", "Swiggy Instamart", "none"]
 
 
 class PlatformTotal(BaseModel):
     total: float
-    missing_items: List[str] = []
+    missing_items: List[str]
 
 
 class ComparisonReport(BaseModel):
@@ -82,15 +88,20 @@ def build_comparison_report(api_key: str, results_by_item: list) -> ComparisonRe
     prompt = (
         "Here is a shopping list and, for each requested item, the raw search "
         "results found on three quick-commerce platforms: Blinkit, Zepto, and "
-        "Swiggy Instamart. For each requested item, pick the single best-matching "
-        "real product from each platform's results (same brand/type and closest "
-        "pack size wherever possible; leave a platform's field null if nothing "
-        "reasonably matches). Then compute, for each platform, the total cost of "
-        "buying every requested item from that platform alone (list any requested "
-        "items missing from that platform in missing_items), and separately the "
-        "cheapest possible total if each item is bought from whichever platform has "
-        "it cheapest (optimal_mixed_total). Write a short, friendly 2-4 sentence "
-        "recommendation as the summary.\n\n"
+        "Swiggy Instamart. You MUST return exactly one ItemComparison entry for "
+        "EVERY requested item, in the same order, even if no good match was found "
+        "for it. For each requested item, pick the single best-matching real "
+        "product from each platform's results (same brand/type and closest pack "
+        "size wherever possible). If a platform has no reasonable match, set that "
+        "platform's found=false, name=\"\", price=-1, quantity_label=\"\" — never "
+        "omit the platform object itself. Set cheapest_platform to \"none\" if no "
+        "platform has a match. Then compute, for each platform, the total cost of "
+        "buying every requested item from that platform alone (only summing items "
+        "actually found there; list any requested items missing from that platform "
+        "by name in missing_items, or an empty list if none are missing), and "
+        "separately the cheapest possible total if each item is bought from "
+        "whichever platform has it cheapest (optimal_mixed_total). Write a short, "
+        "friendly 2-4 sentence recommendation as the summary.\n\n"
         f"{payload}"
     )
     return _structured_call(api_key, prompt, ComparisonReport)
